@@ -22,8 +22,10 @@ class BackupEngine:
         """Busca y copia imágenes accesibles, sin interrumpir por errores individuales."""
         source = self._config.source.resolve()
         destination = self._config.destination.resolve()
-        if source == destination or source in destination.parents:
-            raise ValueError("El destino no puede ser la carpeta de origen ni estar dentro de ella")
+        if source == destination or destination in source.parents:
+            raise ValueError(
+                "El destino no puede ser la carpeta de origen ni contenerla"
+            )
 
         report = BackupReport()
         for image_path in self._scanner.scan(source, excluded_root=destination):
