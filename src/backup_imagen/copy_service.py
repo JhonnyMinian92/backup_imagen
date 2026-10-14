@@ -89,16 +89,22 @@ class CopyService:
 
     def _publish_without_hard_links(self, temporary: Path, target: Path) -> None:
         """Alternativa exclusiva para sistemas de archivos sin enlaces duros."""
+        created_target = False
         try:
             with temporary.open("rb") as reader, target.open("xb") as writer:
+                created_target = True
                 shutil.copyfileobj(reader, writer, length=self._config.chunk_size)
                 writer.flush()
                 os.fsync(writer.fileno())
         except OSError:
-            try:
-                target.unlink(missing_ok=True)
-            except OSError:
-                pass
+            # Solo retirar un archivo que esta ejecución haya creado. Si la
+            # apertura exclusiva falla porque otro proceso ganó la carrera,
+            # jamás debemos borrar el archivo ajeno que ya estaba en el destino.
+            if created_target:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    pass
             raise
 
     @staticmethod
