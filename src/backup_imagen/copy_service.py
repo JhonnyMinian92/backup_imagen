@@ -1,5 +1,6 @@
 """Servicio de copia segura: no sobrescribe ni elimina archivos existentes."""
 
+import errno
 import hashlib
 import os
 import shutil
@@ -17,7 +18,7 @@ class CopyService:
     def copy_one(self, source_file: Path, report: BackupReport) -> None:
         """Copia un archivo; registra el error y permite continuar con el siguiente."""
         try:
-            relative = source_file.relative_to(self._config.source)
+            relative = source_file.relative_to(self._config.source.resolve())
             target_directory = (
                 self._config.destination / self._safe_device_name() / relative.parent
             )
@@ -49,8 +50,6 @@ class CopyService:
             index += 1
 
     def _copy_atomically(self, source: Path, target: Path) -> None:
-        temporary = target.with_name(f".{target.name}.backup-imagen-tmp")
-        # No reemplaza un temporal anterior: se usa un nombre único por proceso.
         temporary = target.with_name(
             f".{target.name}.{os.getpid()}.backup-imagen-tmp"
         )
@@ -59,15 +58,48 @@ class CopyService:
                 shutil.copyfileobj(reader, writer, length=self._config.chunk_size)
                 writer.flush()
                 os.fsync(writer.fileno())
-            # Evita reemplazar archivos creados concurrentemente antes de publicar.
-            if target.exists():
-                raise FileExistsError(f"El destino apareció durante la copia: {target}")
-            os.rename(temporary, target)
+
+            # Un enlace duro publica el archivo completo sin reemplazar un destino
+            # que haya aparecido concurrentemente. Algunos sistemas de archivos,
+            # especialmente FAT32, no admiten enlaces duros.
+            try:
+                os.link(temporary, target)
+                temporary.unlink()
+            except OSError as exc:
+                if target.exists():
+                    raise FileExistsError(
+                        f"El destino apareció durante la copia: {target}"
+                    ) from exc
+                unsupported = {
+                    errno.EPERM,
+                    errno.EXDEV,
+                    errno.EOPNOTSUPP,
+                    errno.ENOSYS,
+                }
+                if hasattr(errno, "ENOTSUP"):
+                    unsupported.add(errno.ENOTSUP)
+                if exc.errno not in unsupported:
+                    raise
+                self._publish_without_hard_links(temporary, target)
         finally:
             try:
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    def _publish_without_hard_links(self, temporary: Path, target: Path) -> None:
+        """Alternativa exclusiva para sistemas de archivos sin enlaces duros."""
+        try:
+            with temporary.open("rb") as reader, target.open("xb") as writer:
+                shutil.copyfileobj(reader, writer, length=self._config.chunk_size)
+                writer.flush()
+                os.fsync(writer.fileno())
+        except OSError:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     @staticmethod
     def _same_content(first: Path, second: Path) -> bool:
@@ -86,6 +118,8 @@ class CopyService:
     def _safe_device_name(self) -> str:
         name = self._config.device_name.strip()
         invalid = '<>:"/\\|?*'
-        safe = "".join("_" if char in invalid or ord(char) < 32 else char for char in name)
+        safe = "".join(
+            "_" if char in invalid or ord(char) < 32 else char for char in name
+        )
         safe = safe.rstrip(" .")
         return safe or "DEVICE"
