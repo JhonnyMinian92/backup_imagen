@@ -5,6 +5,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 python_bin=$(command -v python3)
 python_version=$("$python_bin" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 install_dir="$HOME/.local/share/backup-imagen/py$python_version"
+install_root="$HOME/.local/share/backup-imagen"
 venv_python="$install_dir/bin/python"
 mkdir -p "$(dirname -- "$install_dir")"
 if [ ! -x "$venv_python" ]; then
@@ -14,6 +15,7 @@ if [ ! -x "$venv_python" ]; then
     }
 fi
 "$venv_python" -m pip install "$repo_root"
+printf '%s\n' "$python_version" > "$install_root/python-version"
 
 bin_dir="$HOME/.local/bin"
 service_dir="$HOME/.config/systemd/user"

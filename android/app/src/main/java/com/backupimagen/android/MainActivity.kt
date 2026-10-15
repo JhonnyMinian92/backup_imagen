@@ -8,13 +8,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.hardware.usb.UsbConstants
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
-import android.hardware.usb.UsbDevice
-import android.hardware.usb.UsbManager
-import android.hardware.usb.UsbConstants
 import android.provider.Settings
 import android.view.Gravity
 import android.widget.TextView
@@ -25,22 +25,9 @@ class MainActivity : Activity() {
     private var notificationPermissionRequested = false
     private var startedForThisConnection = false
     private var receiverRegistered = false
-    private var usbPermissionPending = false
+    private var usbPermissionReceiverRegistered = false
+    private var usbPermissionRequested = false
     private var usbPermissionDenied = false
-    private var usbReceiverRegistered = false
-
-    private val usbPermissionReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            usbPermissionPending = false
-            if (intent?.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) == true) {
-                usbPermissionDenied = false
-                startBackupService()
-            } else {
-                usbPermissionDenied = true
-                status.text = "Permiso USB denegado. Desconecta y vuelve a conectar el USB para intentarlo otra vez."
-            }
-        }
-    }
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -49,6 +36,21 @@ class MainActivity : Activity() {
             showStatus(message, errors)
             if (intent.action == BackupService.ACTION_FINISHED) {
                 startedForThisConnection = true
+            }
+        }
+    }
+
+    private val usbPermissionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != ACTION_USB_PERMISSION) return
+            usbPermissionRequested = false
+            val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+            if (granted) {
+                usbPermissionDenied = false
+                maybeStartBackup()
+            } else {
+                usbPermissionDenied = true
+                status.text = "Se necesita permiso para el USB. Desconéctalo y vuelve a conectarlo para intentarlo de nuevo."
             }
         }
     }
@@ -63,14 +65,15 @@ class MainActivity : Activity() {
             setOnClickListener { openStoragePermissionSettings() }
         }
         setContentView(status)
-        val permissionFilter = IntentFilter(ACTION_USB_PERMISSION)
+
+        val usbFilter = IntentFilter(ACTION_USB_PERMISSION)
         if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(usbPermissionReceiver, permissionFilter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(usbPermissionReceiver, usbFilter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             @Suppress("DEPRECATION")
-            registerReceiver(usbPermissionReceiver, permissionFilter)
+            registerReceiver(usbPermissionReceiver, usbFilter)
         }
-        usbReceiverRegistered = true
+        usbPermissionReceiverRegistered = true
     }
 
     override fun onStart() {
@@ -98,9 +101,9 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        if (usbReceiverRegistered) {
+        if (usbPermissionReceiverRegistered) {
             unregisterReceiver(usbPermissionReceiver)
-            usbReceiverRegistered = false
+            usbPermissionReceiverRegistered = false
         }
         super.onDestroy()
     }
@@ -129,6 +132,7 @@ class MainActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         startedForThisConnection = false
+        usbPermissionRequested = false
         usbPermissionDenied = false
         maybeStartBackup()
     }
@@ -144,7 +148,7 @@ class MainActivity : Activity() {
     }
 
     private fun maybeStartBackup() {
-        if (startedForThisConnection || usbPermissionPending || usbPermissionDenied) return
+        if (startedForThisConnection) return
         if (!Environment.isExternalStorageManager()) {
             status.text = "Concede a Backup Imagen acceso a todos los archivos para iniciar el respaldo."
             if (!permissionSettingsOpened) openStoragePermissionSettings()
@@ -160,50 +164,60 @@ class MainActivity : Activity() {
         }
 
         val attachedByUsb = intent?.action == ACTION_USB_DEVICE_ATTACHED
-        if (!attachedByUsb && !AndroidBackupEngine.hasTargetUsb(this)) {
+        val hasMountedTarget = AndroidBackupEngine.hasTargetUsb(this)
+        if (!attachedByUsb && !hasMountedTarget) {
             status.text = "Permiso concedido.\n\nConecta el USB NTFS de 32 GB por OTG para iniciar el respaldo."
             return
         }
 
-        val usbManager = getSystemService(UsbManager::class.java)
-        val deviceFromIntent = if (Build.VERSION.SDK_INT >= 33) {
-            intent?.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            intent?.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
+        if (Build.VERSION.SDK_INT >= 34) {
+            if (usbPermissionDenied || usbPermissionRequested) return
+            val usbManager = getSystemService(UsbManager::class.java)
+            val attachedDevice = usbDeviceFromIntent(intent)
+            val device = attachedDevice ?: usbManager.deviceList.values.firstOrNull(::isUsbStorageDevice)
+            if (device == null) {
+                status.text = "Android no expone el dispositivo USB necesario para iniciar el respaldo. Desconecta y vuelve a conectar el USB OTG."
+                return
+            }
+            if (!usbManager.hasPermission(device)) {
+                requestUsbPermission(usbManager, device)
+                return
+            }
         }
-        val device = deviceFromIntent ?: usbManager.deviceList.values.firstOrNull(::isMassStorageDevice)
-        if (device == null) {
-            status.text = "Android detectó el almacenamiento, pero no expuso el dispositivo USB al sistema de permisos."
-            return
-        }
-        if (usbManager.hasPermission(device)) {
-            startBackupService()
-        } else {
-            requestUsbPermission(usbManager, device)
-        }
+
+        startBackupService()
     }
 
-    private fun requestUsbPermission(manager: UsbManager, device: UsbDevice) {
+    private fun requestUsbPermission(usbManager: UsbManager, device: UsbDevice) {
+        usbPermissionRequested = true
+        status.text = "Autoriza el acceso al dispositivo USB para iniciar el respaldo."
         val permissionIntent = PendingIntent.getBroadcast(
             this,
             USB_PERMISSION_REQUEST,
-            Intent(ACTION_USB_PERMISSION).setPackage(packageName),
+            Intent(ACTION_USB_PERMISSION)
+                .setPackage(packageName)
+                .setData(Uri.parse("backup-imagen://usb-permission/${device.deviceId}")),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        usbPermissionPending = true
-        status.text = "Concede permiso de acceso al USB para iniciar el respaldo."
         try {
-            manager.requestPermission(device, permissionIntent)
+            usbManager.requestPermission(device, permissionIntent)
         } catch (error: Exception) {
-            usbPermissionPending = false
-            startedForThisConnection = false
-            usbPermissionDenied = true
-            status.text = "No se pudo solicitar acceso al USB: ${error.message}"
+            usbPermissionRequested = false
+            status.text = "No se pudo solicitar permiso para el USB: ${error.message}"
         }
     }
 
-    private fun isMassStorageDevice(device: UsbDevice): Boolean =
+    private fun usbDeviceFromIntent(intent: Intent?): UsbDevice? {
+        if (intent?.action != ACTION_USB_DEVICE_ATTACHED) return null
+        return if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
+        }
+    }
+
+    private fun isUsbStorageDevice(device: UsbDevice): Boolean =
         device.deviceClass == UsbConstants.USB_CLASS_MASS_STORAGE ||
             (0 until device.interfaceCount).any {
                 device.getInterface(it).interfaceClass == UsbConstants.USB_CLASS_MASS_STORAGE

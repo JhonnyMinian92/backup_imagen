@@ -2,6 +2,7 @@
 
 import errno
 import hashlib
+import logging
 import os
 import shutil
 import stat
@@ -11,13 +12,18 @@ from pathlib import Path
 
 from backup_imagen.models import BackupConfig, BackupReport
 
+logger = logging.getLogger(__name__)
+
 
 class CopyService:
     """Copia imágenes a un destino preservando rutas relativas."""
 
     def __init__(self, config: BackupConfig) -> None:
         self._config = config
-        self._destination = config.destination.resolve()
+        try:
+            self._destination = config.destination.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"No se pudo resolver el destino {config.destination}: {exc}") from exc
 
     def prepare_backup_root(self, destination: Path | None = None) -> Path:
         """Crea ``backup`` y rechaza rutas redirigidas fuera del USB."""
@@ -34,22 +40,31 @@ class CopyService:
     ) -> None:
         """Copia un archivo; registra el error y permite continuar con el siguiente."""
         try:
-            relative = source_file.relative_to(source_root.resolve())
+            source_root = Path(source_root).resolve(strict=False)
+            source_file = Path(source_file).absolute()
+            if self._is_reparse_point(source_file):
+                raise ValueError("No se copian enlaces ni puntos de reanálisis del origen")
+            resolved_source = source_file.resolve(strict=True)
+            relative = source_file.relative_to(source_root)
+            try:
+                resolved_source.relative_to(source_root)
+            except ValueError as exc:
+                raise ValueError("El archivo de origen resuelve fuera de la carpeta de origen") from exc
             target_parts = ["backup"]
             if root_label:
                 target_parts.append(self._safe_root_label(root_label))
             target_parts.extend(part for part in relative.parent.parts if part not in {"", "."})
             target_directory = self._ensure_directory_chain(self._destination, target_parts)
-            target = self._available_target(target_directory / relative.name, source_file)
+            target = self._available_target(target_directory / relative.name, resolved_source)
             while target is not None:
                 try:
-                    self._copy_atomically(source_file, target)
+                    self._copy_atomically(resolved_source, target)
                     report.copied += 1
                     return
                 except FileExistsError:
-                    target = self._available_target(target_directory / relative.name, source_file)
+                    target = self._available_target(target_directory / relative.name, resolved_source)
             report.skipped_existing += 1
-        except (OSError, ValueError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             report.failed += 1
             self._record_error(report, f"{source_file}: {exc}")
 
@@ -86,15 +101,28 @@ class CopyService:
         finally:
             try:
                 temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning("No se pudo eliminar el archivo temporal %s: %s", temporary, exc)
 
     @staticmethod
     def _rename_without_replace(temporary: Path, target: Path) -> None:
         """Atomically publish a file without replacing an existing destination."""
         if os.name == "nt":
-            os.rename(temporary, target)
-            return
+            import ctypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.MoveFileExW.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.c_uint32,
+            ]
+            kernel32.MoveFileExW.restype = ctypes.c_bool
+            if kernel32.MoveFileExW(str(temporary), str(target), 0):
+                return
+            error_code = ctypes.get_last_error()
+            if error_code in {183, 80}:  # ERROR_ALREADY_EXISTS / ERROR_FILE_EXISTS
+                raise FileExistsError(f"Destination already exists: {target}")
+            raise OSError(error_code, ctypes.FormatError(error_code), str(target))
         if sys.platform.startswith("linux"):
             import ctypes
 
@@ -119,6 +147,8 @@ class CopyService:
             )
             if result != 0:
                 error_code = ctypes.get_errno()
+                if error_code in {errno.EEXIST, errno.EISDIR}:
+                    raise FileExistsError(f"Destination already exists: {target}")
                 raise OSError(error_code, os.strerror(error_code), str(target))
             return
         raise OSError(errno.ENOTSUP, "No safe no-replace rename is available", str(target))

@@ -7,12 +7,14 @@ import android.os.storage.StorageManager
 import android.os.storage.StorageVolume
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
+import java.nio.channels.Channels
+import java.nio.channels.FileChannel
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.LinkOption
-import java.util.ArrayDeque
+import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
+import java.util.ArrayDeque
 import java.util.Locale
 import java.util.UUID
 
@@ -56,7 +58,10 @@ internal class AndroidBackupEngine(
 
         val storageManager = context.getSystemService(StorageManager::class.java)
         fun mountedVolumes(): List<Pair<StorageVolume, File>> = storageManager.storageVolumes
-            .filter { it.state == Environment.MEDIA_MOUNTED }
+            .filter {
+                it.state == Environment.MEDIA_MOUNTED ||
+                    it.state == Environment.MEDIA_MOUNTED_READ_ONLY
+            }
             .mapNotNull { volume -> runCatching { volume.directory?.let { volume to it } }.getOrNull() }
 
         var volumes = mountedVolumes()
@@ -232,15 +237,26 @@ internal class AndroidBackupEngine(
     private fun copyAtomically(source: File, target: File) {
         val temporary = File(target.parentFile, ".${target.name}.${UUID.randomUUID()}.backup-imagen-tmp")
         try {
-            FileInputStream(source).use { input ->
-                FileOutputStream(temporary, false).use { output ->
+            FileChannel.open(
+                temporary.toPath(),
+                StandardOpenOption.CREATE_NEW,
+                StandardOpenOption.WRITE,
+                LinkOption.NOFOLLOW_LINKS,
+            ).use { channel ->
+                FileInputStream(source).use { input ->
+                    val output = Channels.newOutputStream(channel)
                     input.copyTo(output, DEFAULT_BUFFER_SIZE * 16)
-                    output.fd.sync()
+                    output.flush()
+                    channel.force(true)
                 }
             }
             Files.move(temporary.toPath(), target.toPath())
         } finally {
-            temporary.delete()
+            try {
+                Files.deleteIfExists(temporary.toPath())
+            } catch (error: Exception) {
+                scanError("No se pudo eliminar el archivo temporal ${temporary.path}: ${error.message}")
+            }
         }
     }
 
@@ -315,9 +331,15 @@ internal class AndroidBackupEngine(
             val totalBytes = runCatching { StatFs(directory.path).totalBytes }.getOrDefault(0L)
             if (totalBytes !in USB_MIN_BYTES..USB_MAX_BYTES || !directory.canWrite()) return false
 
-            val pathKey = (volume.uuid ?: directory.name).lowercase(Locale.ROOT)
-            val targetPath = directory.toPath().toAbsolutePath().normalize().toString().trimEnd('/')
+            val targetPath = runCatching { directory.canonicalPath }
+                .getOrElse { return false }
+                .trimEnd('/')
                 .lowercase(Locale.ROOT)
+            val expectedMountName = (volume.uuid ?: directory.name).lowercase(Locale.ROOT)
+            // Android vendors commonly expose mounted NTFS-3G volumes as fuseblk,
+            // which does not reveal its underlying filesystem type to applications.
+            // Removable + matching mount + 32 GB narrows the candidate; the product
+            // requirement is that this device is used with the NTFS backup USB.
             val supportedFilesystems = setOf("ntfs", "ntfs3", "ntfs-3g", "fuse.ntfs-3g", "fuseblk")
             val mounts = runCatching { File("/proc/mounts").readLines() }.getOrDefault(emptyList())
             return mounts.any { line ->
@@ -330,7 +352,7 @@ internal class AndroidBackupEngine(
                 val mountPath = Regex("\\\\([0-7]{3})").replace(mountField) { match ->
                     match.groupValues[1].toInt(8).toChar().toString()
                 }.lowercase(Locale.ROOT).trimEnd('/')
-                mountPath == targetPath || mountPath.substringAfterLast('/') == pathKey
+                mountPath == targetPath || mountPath.substringAfterLast('/') == expectedMountName
             }
         }
     }

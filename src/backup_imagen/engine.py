@@ -26,12 +26,18 @@ class BackupEngine:
 
     def run(self) -> BackupReport:
         """Copia imágenes accesibles a ``USB/backup`` sin detenerse por fallos parciales."""
-        destination = self._config.destination.resolve()
+        try:
+            destination = self._config.destination.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"No se pudo resolver el destino {self._config.destination}: {exc}") from exc
         if self._config.require_ntfs_32gb:
             validate_ntfs_32gb(destination)
 
         if self._config.source is not None:
-            source = self._config.source.resolve()
+            try:
+                source = self._config.source.resolve()
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(f"No se pudo resolver el origen {self._config.source}: {exc}") from exc
             if source == destination or destination in source.parents:
                 raise ValueError("El destino no puede ser la carpeta de origen ni contenerla")
             roots = [(source, None)]

@@ -18,12 +18,9 @@ if ($pythonwPath) {
         $pythonPath = $siblingPython
     }
 }
-if (-not $pythonPath) {
-    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
-    if ($pythonCommand) {
-        $pythonPath = $pythonCommand.Source
-    }
-}
 if ($pythonPath) {
     & $pythonPath -m pip uninstall -y backup-imagen
+    if ($LASTEXITCODE -ne 0) {
+        throw 'No se pudo desinstalar Backup Imagen del entorno Python asociado al monitor.'
+    }
 }

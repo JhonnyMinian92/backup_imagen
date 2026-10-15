@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import subprocess
@@ -76,6 +77,8 @@ def _acquire_windows_singleton() -> int | None:
 
 def watch_for_usb(poll_interval: float = 2.0) -> None:
     """Espera unidades NTFS de 32 GB nuevas y lanza una consola por conexión."""
+    if not math.isfinite(poll_interval) or poll_interval <= 0:
+        raise ValueError("poll_interval debe ser un número finito mayor que cero")
     if os.name != "nt" and not sys.platform.startswith("linux"):
         raise RuntimeError(f"El monitor automático no está disponible en {os.name}")
 

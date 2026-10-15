@@ -1,5 +1,7 @@
 """Descubrimiento recursivo de imágenes sin abrir ni modificar sus contenidos."""
 
+import os
+import stat
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -31,6 +33,10 @@ class ImageScanner:
         on_error: Callable[[OSError], None] | None = None,
     ) -> Iterator[Path]:
         """Produce archivos admitidos y comunica errores de recorrido al llamador."""
+        try:
+            root = Path(root).resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"No se pudo resolver la carpeta de origen {root}: {exc}") from exc
         if not root.exists():
             raise FileNotFoundError(f"No existe la carpeta de origen: {root}")
         if not root.is_dir():
@@ -38,7 +44,7 @@ class ImageScanner:
 
         excluded = self._resolved_or_none(excluded_root)
         for current, directories, filenames in self._walk(root, on_error):
-            current_path = Path(current)
+            current_path = Path(current).resolve(strict=False)
             if root == Path("/") and current_path == root:
                 directories[:] = [
                     name for name in directories if name not in {"proc", "sys", "dev"}
@@ -79,6 +85,8 @@ class ImageScanner:
             return None
         try:
             return path.resolve()
+        except RuntimeError as exc:
+            raise ValueError(f"La ruta contiene un enlace cíclico: {path}") from exc
         except OSError:
             return path.absolute()
 
@@ -87,7 +95,19 @@ class ImageScanner:
         if path.is_symlink():
             return True
         is_junction = getattr(path, "is_junction", None)
-        return bool(is_junction is not None and is_junction())
+        if is_junction is not None and is_junction():
+            return True
+        # Path.is_junction() was added in Python 3.12, while this project supports
+        # Python 3.10+. On older Windows versions, inspect the reparse-point bit
+        # directly so junctions cannot make os.walk leave the source tree or loop.
+        if os.name == "nt":
+            try:
+                attributes = path.lstat().st_file_attributes
+            except (AttributeError, OSError):
+                return False
+            reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            return bool(attributes & reparse_point)
+        return False
 
     @classmethod
     def _is_excluded(cls, path: Path, excluded: Path | None) -> bool:
