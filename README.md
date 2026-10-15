@@ -1,31 +1,60 @@
 # Backup Imagen
 
-Herramienta local para respaldar fotografías e imágenes desde equipos Windows, Linux y Android hacia una memoria USB.
+Respaldo local de imágenes desde un PC Windows/Linux o un teléfono Android hacia un USB NTFS de 32 GB. Al conectar el USB, el monitor del equipo inicia el respaldo; la consola o pantalla de estado presenta el resultado. Durante el respaldo no se usa Internet ni se suben archivos.
 
-## Estado del proyecto
+## Comportamiento
 
-Desarrollo inicial. El motor de escritorio se está construyendo primero; la aplicación Android nativa y los paquetes distribuibles se incorporarán en fases posteriores. No se considera listo para uso real hasta completar las pruebas en equipos y sistemas de archivos físicos.
+- El destino es siempre la carpeta `backup` en la raíz del USB.
+- Se conserva el nombre y la ruta relativa de cada archivo. En PC, cada unidad de origen se identifica por su letra dentro de `backup` (`backup/C/...`, `backup/D/...`). En Android se conserva cada almacenamiento bajo una etiqueta (`backup/Interno/...`).
+- Se copian los archivos como están; no se convierten ni modifican los originales.
+- Si el archivo de destino tiene el mismo contenido, se omite. Si coincide el nombre pero el contenido es distinto, se crea `nombre (copia 1).ext`, incrementando el sufijo si hace falta.
+- Se publica cada copia cuando termina. Un error de archivo o carpeta se registra y el recorrido continúa cuando es seguro.
+- Al final se informa cuántas imágenes encontró, copió, omitió y no pudo procesar.
 
-## Principios
+## Formatos incluidos
 
-- Copiar, nunca borrar ni modificar los archivos originales.
-- No sobrescribir archivos existentes en el destino.
-- Conservar la estructura relativa de carpetas.
-- Si un nombre ya existe con contenido distinto, crear un nombre alternativo.
-- Copiar a un archivo temporal y publicarlo cuando la copia termine correctamente.
-- Informar de los errores por archivo y continuar cuando sea seguro.
-- No usar Internet durante los respaldos ni subir datos.
+JPG/JPEG, PNG, WebP, AVIF, GIF, TIFF/TIF, RAW y variantes de cámaras, BMP, HEIC/HEIF, ICO, SVG, AI, EPS, CDR, PSD, PSB y PDF. La detección se realiza por extensión y conserva los bytes originales. Lottie y los archivos `.json` no se copian.
 
-## Plataformas previstas
+## USB de destino
 
-- Windows y Linux: aplicación de consola en Python.
-- Android: aplicación nativa Kotlin, con permisos explícitos mediante las APIs de almacenamiento de Android y acceso OTG cuando el dispositivo lo permita.
+El programa reconoce memorias NTFS con una capacidad aproximada de 32 GB. FAT32 no forma parte del destino admitido. El monitor no escribe en una ruta local cuando falta el USB.
 
-La compatibilidad con NTFS, FAT32 y exFAT depende del sistema operativo, sus controladores y el dispositivo. FAT32 no admite archivos individuales de 4 GiB o más.
+## PC Windows
 
-## Desarrollo
+Requiere Python 3.10 o posterior. Ejecuta PowerShell desde la carpeta del proyecto y registra el monitor para que se inicie al iniciar sesión:
 
-Requisitos iniciales: Python 3.10 o superior y pytest para ejecutar las pruebas.
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\install-windows-watcher.ps1
+```
+
+Después de iniciar sesión, conecta el USB NTFS de 32 GB. Se abrirá una consola que recorre las unidades fijas y extraíbles accesibles, excluye el USB de destino y muestra el resumen. Para quitar el monitor:
+
+```powershell
+.\scripts\uninstall-windows-watcher.ps1
+```
+
+## PC Linux
+
+Requiere Python 3.10 o posterior, `python3-venv`, systemd de usuario y una terminal gráfica. El instalador crea un entorno Python aislado y registra el monitor con:
+
+```bash
+sh scripts/install-linux-watcher.sh
+```
+
+Al iniciar la sesión, el monitor detecta un volumen NTFS de aproximadamente 32 GB y abre la terminal disponible. Para desinstalarlo:
+
+```bash
+sh scripts/uninstall-linux-watcher.sh
+```
+
+## Android
+
+La app nativa y sus instrucciones de compilación/instalación están en [`android/README.md`](android/README.md). En el primer uso, Android solicita el permiso de acceso amplio al almacenamiento compartido. El teléfono debe permitir el acceso OTG al USB NTFS confirmado para ese modelo.
+
+Android no permite leer las carpetas privadas de otras aplicaciones. El respaldo recorre el almacenamiento compartido y los volúmenes montados accesibles para la app.
+
+## Desarrollo y compilación
 
 ```bash
 python -m venv .venv
@@ -33,25 +62,20 @@ python -m venv .venv
 # Linux: source .venv/bin/activate
 python -m pip install -e ".[dev]"
 pytest
+python -m ruff check .
 ```
 
-Ejemplo de uso del motor:
+Para compilar Android en Windows:
 
-```bash
-python -m backup_imagen --source "/ruta/imagenes" --destination "/ruta/USB/backup" --device-name "ANDROID-01"
+```powershell
+cd android
+.\gradlew.bat assembleDebug
 ```
 
-En Windows, sustituye las rutas por rutas válidas del sistema, por ejemplo `E:\\backup`.
+El APK de depuración queda en `android/app/build/outputs/apk/debug/app-debug.apk`.
 
-## Estructura
+## Límites
 
-- `src/backup_imagen/`: motor de copia y CLI.
-- `tests/`: pruebas automatizadas.
-- `android/`: aplicación nativa Android (fase posterior).
-
-## Limitaciones actuales
-
-- La versión inicial del motor trabaja sobre una carpeta de origen que el usuario especifica; todavía no descubre automáticamente todos los discos ni tiene integración Android.
-- Los formatos se detectan por extensión; no se convierten ni se decodifican las imágenes.
-- El programa no puede acceder a carpetas protegidas o privadas sin autorización del sistema operativo.
-- El arranque automático desde USB no está garantizado y se evitará cualquier mecanismo que el sistema operativo bloquee por seguridad.
+- El sistema operativo determina qué carpetas son accesibles. En PC, carpetas protegidas pueden registrarse como no procesadas.
+- El destino debe ser un volumen NTFS montado con capacidad cercana a 32 GB. El espacio libre real depende de los archivos que ya tenga.
+- Antes del uso diario, valida el flujo en el PC y los teléfonos objetivo conectados al USB físico.

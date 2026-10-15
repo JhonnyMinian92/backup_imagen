@@ -17,6 +17,7 @@ dev = ["pytest>=7.4", "ruff>=0.5"]
 
 [project.scripts]
 backup-imagen = "backup_imagen.cli:main"
+backup-imagen-watch = "backup_imagen.watcher_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
